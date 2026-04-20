@@ -26,9 +26,9 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run pipeline
+   - name: Run pipeline
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_ROLE_JWT: ${{ secrets.SUPABASE_SERVICE_ROLE_JWT }}
         run: |
           python pipeline/pipeline.py
