@@ -2,8 +2,11 @@ name: Daily pipeline
 
 on:
   schedule:
-    - cron: "0 3 * * *"   # runs every day at 03:00 UTC
-  workflow_dispatch:      # allows manual run from GitHub button
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # fixes Node.js deprecation warning
 
 jobs:
   run-pipeline:
@@ -20,6 +23,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          pip install --upgrade pip
           pip install -r pipeline/requirements.txt
 
       - name: Run pipeline
