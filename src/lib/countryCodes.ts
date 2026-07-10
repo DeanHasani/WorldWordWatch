@@ -40,4 +40,5 @@ export const supportedCountries = new Set([
   'AR', 'ZA', 'NG', 'EG', 'TR', 'PK', 'ID', 'PH', 'MY', 'TH',
   'PT', 'AT', 'BE', 'DK', 'FI', 'GR', 'CZ', 'HU', 'RO', 'UA',
   'NZ', 'SG', 'IL', 'SA', 'AE', 'CO', 'CL', 'PE', 'VN', 'BD',
+  'AL',
 ]);

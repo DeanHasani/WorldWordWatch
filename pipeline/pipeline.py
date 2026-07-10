@@ -1,6 +1,10 @@
 """
 World Word Watch - Daily Data Pipeline
-Fetches headlines from Google News RSS and Reddit, computes trending words per country.
+Computes trending words per country from four free sources:
+  1. Google News RSS        - localized headlines per country/language
+  2. Reddit                 - hot post titles from each country's subreddit
+  3. Google Trends RSS      - daily trending search queries per country
+  4. Wikimedia Pageviews    - most-read Wikipedia articles per country
 """
 
 import os
@@ -28,9 +32,14 @@ log = logging.getLogger(__name__)
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_JWT = os.environ.get("SUPABASE_SERVICE_ROLE_JWT")
 
-REDDIT_USER_AGENT = "WorldWordWatch/1.0 (github.com/youruser/world-word-watch)"
+USER_AGENT = "WorldWordWatch/1.0 (github.com/DeanHasani/WorldWordWatch)"
 REDDIT_BASE = "https://www.reddit.com"
 NEWS_RSS_URL = "https://news.google.com/rss?hl={lang}&gl={country}&ceid={country}:{lang}"
+TRENDS_RSS_URL = "https://trends.google.com/trending/rss?geo={country}"
+WIKI_TOP_URL = (
+    "https://wikimedia.org/api/rest_v1/metrics/pageviews/"
+    "top-per-country/{country}/all-access/{year}/{month:02d}/{day:02d}"
+)
 
 EXTRA_STOPWORDS = {
     "said", "says", "say", "new", "one", "two", "three", "year", "years",
@@ -56,6 +65,22 @@ LANG_STOPWORD_MAP = {
     "ro": "romanian", "tr": "turkish", "ar": "arabic", "zh": "chinese",
     "ja": "japanese", "ko": "korean", "th": "thai", "vi": "english",
     "id": "indonesian", "el": "greek", "he": "english", "bn": "english",
+}
+
+# Stopwords for languages NLTK does not ship (merged on top of the English fallback).
+CUSTOM_STOPWORDS = {
+    "sq": {  # Albanian
+        "dhe", "por", "ose", "për", "nga", "një", "është", "janë", "ishte",
+        "ishin", "kam", "keni", "kanë", "duke", "mund", "duhet", "vetëm",
+        "shumë", "pak", "gjithë", "gjitha", "këtë", "kjo", "ky", "këto",
+        "kësaj", "këtij", "ata", "ato", "ajo", "tij", "saj", "tyre", "jonë",
+        "juaj", "vet", "vetë", "tek", "deri", "sipas", "gjatë", "pas",
+        "para", "mbi", "nën", "brenda", "jashtë", "edhe", "ende", "sepse",
+        "nëse", "kur", "pse", "çfarë", "cili", "cila", "cilat", "sot",
+        "dje", "nesër", "vit", "viti", "vitin", "ditë", "dita", "ditën",
+        "shqipëri", "shqipëria", "shqipërisë", "shqiptar", "shqiptare",
+        "lajme", "lajmet", "qeveria", "kryeministri", "presidenti",
+    },
 }
 
 
@@ -97,7 +122,7 @@ def get_stopwords(lang_code: str) -> set:
         words = set(nltk_sw.words(lang_name))
     except Exception:
         words = set(nltk_sw.words("english"))
-    return words | EXTRA_STOPWORDS
+    return words | CUSTOM_STOPWORDS.get(lang_code, set()) | EXTRA_STOPWORDS
 
 
 def clean_text(text: str) -> str:
@@ -128,7 +153,7 @@ def fetch_google_news(country_code: str, lang: str, max_items: int = 60) -> list
 
 
 def fetch_reddit(subreddit: str, max_posts: int = 50) -> list[str]:
-    headers = {"User-Agent": REDDIT_USER_AGENT}
+    headers = {"User-Agent": USER_AGENT}
     url = f"{REDDIT_BASE}/r/{subreddit}/hot.json?limit={max_posts}"
     try:
         resp = requests.get(url, headers=headers, timeout=10)
@@ -148,6 +173,47 @@ def fetch_reddit(subreddit: str, max_posts: int = 50) -> list[str]:
         except Exception as e2:
             log.warning(f"  r/worldnews also failed: {e2}")
             return []
+
+
+def fetch_google_trends(country_code: str, max_items: int = 25) -> list[str]:
+    """Daily trending search queries from Google Trends RSS (free, no API key)."""
+    url = TRENDS_RSS_URL.format(country=country_code)
+    try:
+        feed = feedparser.parse(url)
+        titles = [e.title for e in feed.entries[:max_items] if hasattr(e, "title")]
+        log.info(f"  Google Trends [{country_code}]: {len(titles)} trending searches")
+        return titles
+    except Exception as e:
+        log.warning(f"  Google Trends [{country_code}] failed: {e}")
+        return []
+
+
+def fetch_wikipedia_top(country_code: str, max_items: int = 40) -> list[str]:
+    """Most-read Wikipedia articles per country via the Wikimedia Pageviews API
+    (free, no API key). Data is published with a one-day lag, so query yesterday."""
+    day = date.today() - timedelta(days=1)
+    url = WIKI_TOP_URL.format(
+        country=country_code, year=day.year, month=day.month, day=day.day
+    )
+    try:
+        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
+        resp.raise_for_status()
+        articles = resp.json()["items"][0]["articles"]
+        titles = []
+        for article in articles:
+            name = article.get("article", "")
+            # Skip main pages and namespace pages like "Special:Search" /
+            # "Spezial:Suche" (namespace prefixes are localized per wiki).
+            if not name or name == "Main_Page" or re.match(r"^[^_\s:]+:", name):
+                continue
+            titles.append(name.replace("_", " "))
+            if len(titles) >= max_items:
+                break
+        log.info(f"  Wikipedia [{country_code}]: {len(titles)} top articles")
+        return titles
+    except Exception as e:
+        log.warning(f"  Wikipedia [{country_code}] failed: {e}")
+        return []
 
 
 def count_words(texts: list[str], stopwords: set) -> Counter:
@@ -275,7 +341,9 @@ def process_country(supabase_client, country: dict, today: date, today_str: str)
 
     news_titles = fetch_google_news(code, lang)
     reddit_titles = fetch_reddit(subreddit)
-    all_texts = news_titles + reddit_titles
+    trends_titles = fetch_google_trends(code)
+    wiki_titles = fetch_wikipedia_top(code)
+    all_texts = news_titles + reddit_titles + trends_titles + wiki_titles
     sources_count = len(all_texts)
 
     if not all_texts:
